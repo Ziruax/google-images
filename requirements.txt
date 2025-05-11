@@ -1,0 +1,4 @@
+streamlit==1.38.0
+google_images_download==2.8.0
+pillow==10.4.0
+requests==2.32.3
