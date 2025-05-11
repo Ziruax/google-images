@@ -2,12 +2,13 @@ import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 from fake_useragent import UserAgent
-from googlesearch import search
 from PIL import Image, ImageFilter
 from io import BytesIO
 import zipfile
 import time
 import re
+
+GOOGLE_IMAGE = "https://www.google.com/search?tbm=isch&"
 
 def get_image_urls(query, num_images=50):
     """Fetch image URLs from Google Images using web scraping."""
@@ -16,52 +17,56 @@ def get_image_urls(query, num_images=50):
         return []
     
     ua = UserAgent()
-    headers = {"User-Agent": ua.random}
     image_urls = []
+    start = 0
+    images_per_page = 20  # Google typically loads ~20 images per request
     
     try:
-        # Use googlesearch-python to get Google Images search URL
-        search_query = f"{query} site:*.jpg"  # Restrict to JPG images
-        search_url = None
-        for url in search(search_query, tld="com", num=1, stop=1, pause=2, tbm="isch"):
-            search_url = url
-            break
-        
-        if not search_url:
-            st.warning("No search results found for the query.")
-            return []
-        
-        # Fetch the Google Images page
-        response = requests.get(search_url, headers=headers, timeout=10)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, "html.parser")
-        
-        # Extract image URLs from img tags
-        img_tags = soup.find_all("img")
-        for img in img_tags:
-            src = img.get("src")
-            if src and src.startswith("http") and src.endswith(".jpg"):
-                image_urls.append(src)
-                if len(image_urls) >= num_images:
-                    break
-        
-        # Extract additional image URLs from script tags (JSON-like data)
-        scripts = soup.find_all("script")
-        for script in scripts:
-            if "AF_initDataCallback" in script.text:
-                # Extract JSON-like data containing image URLs
-                matches = re.findall(r'"(https?://[^"]+\.jpg)"', script.text)
-                for url in matches:
-                    if url not in image_urls:
-                        image_urls.append(url)
+        while len(image_urls) < num_images:
+            # Construct search URL with pagination
+            search_url = f"{GOOGLE_IMAGE}q={query}&start={start}"
+            headers = {"User-Agent": ua.random}
+            
+            # Fetch the page
+            response = requests.get(search_url, headers=headers, timeout=10)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, "html.parser")
+            
+            # Extract image URLs from <img> tags (src and data-src)
+            img_tags = soup.find_all("img")
+            for img in img_tags:
+                src = img.get("src") or img.get("data-src")
+                if src and src.startswith("http") and src.endswith(".jpg"):
+                    if src not in image_urls:
+                        image_urls.append(src)
                         if len(image_urls) >= num_images:
                             break
-            if len(image_urls) >= num_images:
+            
+            # Extract additional image URLs from <script> tags (JSON-like data)
+            scripts = soup.find_all("script")
+            for script in scripts:
+                if "AF_initDataCallback" in script.text:
+                    matches = re.findall(r'"(https?://[^"]+\.jpg)"', script.text)
+                    for url in matches:
+                        if url not in image_urls:
+                            image_urls.append(url)
+                            if len(image_urls) >= num_images:
+                                break
+                if len(image_urls) >= num_images:
+                    break
+            
+            # Break if no more images are found
+            if not img_tags and not matches:
                 break
-        
-        # Simulate scrolling by making additional requests if needed
-        if len(image_urls) < num_images:
-            st.warning(f"Only found {len(image_urls)} images. Google may require scrolling or has limited results.")
+            
+            # Move to next page
+            start += images_per_page
+            time.sleep(1)  # Delay to avoid rate limiting
+            
+            # Warn if fewer images are found
+            if len(image_urls) < num_images and start >= 100:
+                st.warning(f"Only found {len(image_urls)} images. Google may have limited results.")
+                break
         
         if not image_urls:
             st.warning("No images found for the query.")
