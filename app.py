@@ -4,209 +4,164 @@ from bs4 import BeautifulSoup
 from fake_useragent import UserAgent
 from PIL import Image, ImageFilter
 from io import BytesIO
-import zipfile
-import time
 import re
+import time
 
 GOOGLE_IMAGE = "https://www.google.com/search?tbm=isch&"
 
 def get_image_urls(query, num_images=50):
-    """Fetch image URLs from Google Images using web scraping."""
-    if num_images < 1 or num_images > 50:
-        st.error("Number of images must be between 1 and 50.")
+    """Fetch image URLs from Google Images using improved scraping techniques."""
+    if num_images < 1 or num_images > 100:
+        st.error("Number of images must be between 1 and 100.")
         return []
     
     ua = UserAgent()
     image_urls = []
     start = 0
-    images_per_page = 20  # Google typically loads ~20 images per request
+    headers = {
+        "User-Agent": ua.random,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Referer": "https://www.google.com/",
+        "DNT": "1",
+    }
     
     try:
         while len(image_urls) < num_images:
-            # Construct search URL with pagination
             search_url = f"{GOOGLE_IMAGE}q={query}&start={start}"
-            headers = {"User-Agent": ua.random}
-            
-            # Fetch the page
-            response = requests.get(search_url, headers=headers, timeout=10)
+            response = requests.get(search_url, headers=headers, timeout=15)
             response.raise_for_status()
             soup = BeautifulSoup(response.text, "html.parser")
             
-            # Extract image URLs from <img> tags (src and data-src)
+            # Extract from JSON structures in script tags
+            scripts = soup.find_all("script")
+            image_pattern = re.compile(r'"https?://[^"]+\.(?:jpg|jpeg|png|webp)"')
+            for script in scripts:
+                matches = image_pattern.findall(script.text)
+                for url in matches:
+                    cleaned_url = url.strip('"').split("\\u003d")[0]
+                    if cleaned_url.startswith("http") and cleaned_url not in image_urls:
+                        image_urls.append(cleaned_url)
+                        if len(image_urls) >= num_images:
+                            break
+                if len(image_urls) >= num_images:
+                    break
+
+            # Extract from img tags
             img_tags = soup.find_all("img")
             for img in img_tags:
                 src = img.get("src") or img.get("data-src")
-                if src and src.startswith("http") and src.endswith(".jpg"):
-                    if src not in image_urls:
-                        image_urls.append(src)
+                if src and src.startswith("http"):
+                    clean_src = src.split("?")[0]
+                    if clean_src not in image_urls:
+                        image_urls.append(clean_src)
                         if len(image_urls) >= num_images:
                             break
-            
-            # Extract additional image URLs from <script> tags (JSON-like data)
-            scripts = soup.find_all("script")
-            for script in scripts:
-                if "AF_initDataCallback" in script.text:
-                    matches = re.findall(r'"(https?://[^"]+\.jpg)"', script.text)
-                    for url in matches:
-                        if url not in image_urls:
-                            image_urls.append(url)
-                            if len(image_urls) >= num_images:
-                                break
                 if len(image_urls) >= num_images:
                     break
-            
-            # Break if no more images are found
+
             if not img_tags and not matches:
                 break
-            
-            # Move to next page
-            start += images_per_page
-            time.sleep(1)  # Delay to avoid rate limiting
-            
-            # Warn if fewer images are found
+
+            start += 20
+            time.sleep(1.5)
+
             if len(image_urls) < num_images and start >= 100:
-                st.warning(f"Only found {len(image_urls)} images. Google may have limited results.")
+                st.warning(f"Found {len(image_urls)} images. Google may have limited results.")
                 break
-        
-        if not image_urls:
-            st.warning("No images found for the query.")
-            return []
-        
-        return image_urls[:num_images]
-    except requests.exceptions.RequestException as e:
-        st.error(f"Error fetching images: {e}")
-        return []
+
+        return list(set(image_urls))[:num_images]
+    
     except Exception as e:
-        st.error(f"Error processing search results: {e}")
+        st.error(f"Error fetching images: {str(e)}")
         return []
 
 def process_image(url, target_width, target_height, enhance=True):
-    """Download, resize, crop, and optionally enhance the image."""
+    """Improved image processing with better error handling."""
     try:
-        ua = UserAgent()
-        headers = {"User-Agent": ua.random}
-        response = requests.get(url, headers=headers, timeout=10)
+        headers = {"User-Agent": UserAgent().random}
+        response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
+        
         img = Image.open(BytesIO(response.content)).convert("RGB")
-        
-        # Calculate original aspect ratio
         orig_width, orig_height = img.size
-        orig_aspect = orig_width / orig_height
         target_aspect = target_width / target_height
-        
-        # Resize and crop based on aspect ratio
+        orig_aspect = orig_width / orig_height
+
         if orig_aspect > target_aspect:
             new_height = target_height
-            new_width = int(new_height * orig_aspect)
+            new_width = int(orig_width * (target_height / orig_height))
             img = img.resize((new_width, new_height), Image.LANCZOS)
-            left = (new_width - target_width) / 2
-            right = left + target_width
-            img = img.crop((left, 0, right, new_height))
+            left = (new_width - target_width) // 2
+            img = img.crop((left, 0, left + target_width, target_height))
         else:
             new_width = target_width
-            new_height = int(new_width / orig_aspect)
+            new_height = int(orig_height * (target_width / orig_width))
             img = img.resize((new_width, new_height), Image.LANCZOS)
-            top = (new_height - target_height) / 2
-            bottom = top + target_height
-            img = img.crop((0, top, new_width, bottom))
-        
-        # Apply sharpening filter if enhancement is enabled
+            top = (new_height - target_height) // 2
+            img = img.crop((0, top, target_width, top + target_height))
+
         if enhance:
-            img = img.filter(ImageFilter.SHARPEN)
+            img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
+        
         return img
-    except requests.exceptions.RequestException as e:
-        st.error(f"Error downloading image {url}: {e}")
-        return None
     except Exception as e:
-        st.error(f"Error processing image {url}: {e}")
+        st.error(f"Failed to process {url}: {str(e)}")
         return None
 
 def image_to_bytes(img):
-    """Convert PIL image to bytes for download."""
+    """Convert PIL image to bytes with quality optimization."""
     buffered = BytesIO()
-    img.save(buffered, format="JPEG")
+    img.save(buffered, format="JPEG", quality=85, optimize=True)
     return buffered.getvalue()
 
-# Streamlit app layout
-st.title("Google Images Downloader and Processor")
+# Streamlit UI
+st.title("Google Images Scraper & Processor")
 
-# Sidebar for controls
 with st.sidebar:
-    st.header("Settings")
-    num_images = st.number_input("Number of images to fetch", min_value=1, max_value=50, value=50)
-    enhance_images = st.checkbox("Enhance images (sharpen)", value=True)
-    if st.button("Clear"):
-        st.session_state.clear()
-        st.experimental_rerun()
+    st.header("Configuration")
+    num_images = st.slider("Number of images to fetch", 1, 100, 50)
+    enhance = st.checkbox("Enhance image quality", True)
+    aspect_ratio = st.radio("Aspect Ratio", ["16:9", "9:16"], index=0)
 
-# User input for search query
-query = st.text_input("Enter search query:")
-if st.button("Search"):
-    with st.spinner(f"Fetching {num_images} images..."):
-        image_urls = get_image_urls(query, num_images)
-    if image_urls:
-        st.session_state.image_urls = image_urls
-    else:
-        st.session_state.image_urls = []
-else:
-    image_urls = st.session_state.get("image_urls", [])
+query = st.text_input("Search query:", key="search_input")
+target_size = (1920, 1080) if aspect_ratio == "16:9" else (1080, 1920)
 
-# Display images for selection
-if image_urls:
-    st.write("### Select Images to Process")
-    num_cols = min(3, len(image_urls))  # Dynamic columns based on image count
-    cols = st.columns(num_cols)
-    selected_images = []
-    for i, url in enumerate(image_urls):
-        with cols[i % num_cols]:
-            try:
-                st.image(url, use_column_width=True)
-                if st.checkbox("Select", key=f"select_{url}"):
-                    selected_images.append(url)
-            except:
-                st.warning(f"Failed to display image {i+1}")
-    
-    # Aspect ratio selection
-    aspect_ratio = st.radio("Select aspect ratio:", ("16:9 (landscape)", "9:16 (portrait)"), index=0)
-    if aspect_ratio == "16:9 (landscape)":
-        target_width, target_height = 1920, 1080
+if st.button("Search and Process"):
+    if not query:
+        st.warning("Please enter a search query!")
     else:
-        target_width, target_height = 1080, 1920
-    
-    # Process selected images
-    if st.button("Process"):
-        if not selected_images:
-            st.warning("Please select at least one image to process.")
+        with st.spinner("Scraping Google Images..."):
+            urls = get_image_urls(query, num_images)
+        
+        if not urls:
+            st.error("No images found. Try a different query.")
+            st.stop()
+        
+        processed_images = []
+        progress_bar = st.progress(0)
+        
+        for i, url in enumerate(urls):
+            with st.spinner(f"Processing image {i+1}/{len(urls)}..."):
+                img = process_image(url, *target_size, enhance)
+                if img:
+                    processed_images.append(img)
+            progress_bar.progress((i+1)/len(urls))
+        
+        if processed_images:
+            st.success(f"Successfully processed {len(processed_images)} images")
+            cols = st.columns(3)
+            
+            for idx, img in enumerate(processed_images):
+                with cols[idx % 3]:
+                    st.image(img, use_column_width=True)
+                    img_bytes = image_to_bytes(img)
+                    st.download_button(
+                        label=f"Download Image {idx+1}",
+                        data=img_bytes,
+                        file_name=f"{query.replace(' ', '_')}_{idx+1}.jpg",
+                        mime="image/jpeg",
+                        key=f"download_{idx}"
+                    )
         else:
-            with st.spinner("Processing images..."):
-                processed_images = []
-                for url in selected_images:
-                    img = process_image(url, target_width, target_height, enhance_images)
-                    if img:
-                        processed_images.append(img)
-            if processed_images:
-                st.success(f"Successfully processed {len(processed_images)} images.")
-                # Create zip file for download
-                zip_buffer = BytesIO()
-                with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-                    for i, img in enumerate(processed_images):
-                        img_bytes = image_to_bytes(img)
-                        zip_file.writestr(f"image_{i+1}.jpg", img_bytes)
-                zip_buffer.seek(0)
-                st.download_button(
-                    label="Download All Images",
-                    data=zip_buffer,
-                    file_name="processed_images.zip",
-                    mime="application/zip"
-                )
-                # Display processed images in a grid
-                num_display_cols = min(3, len(processed_images))
-                display_cols = st.columns(num_display_cols)
-                for i, img in enumerate(processed_images):
-                    with display_cols[i % num_display_cols]:
-                        st.image(img, caption=f"Image {i+1}", use_column_width=True)
-            else:
-                st.error("No images were processed successfully.")
-else:
-    if query:
-        st.info("No images to display. Try searching again.")
+            st.error("Failed to process any images. Try different settings.")
