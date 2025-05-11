@@ -1,23 +1,36 @@
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
+from concurrent.futures import ThreadPoolExecutor
 from fake_useragent import UserAgent
 from PIL import Image, ImageFilter
 from io import BytesIO
 import re
 import time
+import json
 
+# Configuration
 GOOGLE_IMAGE = "https://www.google.com/search?tbm=isch&"
+MAX_WORKERS = 5  # For concurrent processing
+SESSION_STATE = st.session_state
 
-def get_image_urls(query, num_images=50):
-    """Fetch image URLs from Google Images using improved scraping techniques."""
-    if num_images < 1 or num_images > 100:
-        st.error("Number of images must be between 1 and 100.")
-        return []
-    
+# Initialize session state variables
+if 'errors' not in SESSION_STATE:
+    SESSION_STATE.errors = []
+if 'processed' not in SESSION_STATE:
+    SESSION_STATE.processed = []
+if 'metadata' not in SESSION_STATE:
+    SESSION_STATE.metadata = {}
+
+def clear_state():
+    SESSION_STATE.errors.clear()
+    SESSION_STATE.processed.clear()
+    SESSION_STATE.metadata.clear()
+
+def get_image_urls(query, num_images=100):
+    """High-performance image URL scraping with advanced parsing"""
+    clear_state()
     ua = UserAgent()
-    image_urls = []
-    start = 0
     headers = {
         "User-Agent": ua.random,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
@@ -27,141 +40,173 @@ def get_image_urls(query, num_images=50):
     }
     
     try:
-        while len(image_urls) < num_images:
-            search_url = f"{GOOGLE_IMAGE}q={query}&start={start}"
-            response = requests.get(search_url, headers=headers, timeout=15)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, "html.parser")
-            
-            # Extract from JSON structures in script tags
-            scripts = soup.find_all("script")
-            image_pattern = re.compile(r'"https?://[^"]+\.(?:jpg|jpeg|png|webp)"')
-            for script in scripts:
-                matches = image_pattern.findall(script.text)
-                for url in matches:
-                    cleaned_url = url.strip('"').split("\\u003d")[0]
-                    if cleaned_url.startswith("http") and cleaned_url not in image_urls:
-                        image_urls.append(cleaned_url)
-                        if len(image_urls) >= num_images:
-                            break
-                if len(image_urls) >= num_images:
-                    break
-
-            # Extract from img tags
-            img_tags = soup.find_all("img")
-            for img in img_tags:
-                src = img.get("src") or img.get("data-src")
-                if src and src.startswith("http"):
-                    clean_src = src.split("?")[0]
-                    if clean_src not in image_urls:
-                        image_urls.append(clean_src)
-                        if len(image_urls) >= num_images:
-                            break
-                if len(image_urls) >= num_images:
-                    break
-
-            if not img_tags and not matches:
-                break
-
-            start += 20
-            time.sleep(1.5)
-
-            if len(image_urls) < num_images and start >= 100:
-                st.warning(f"Found {len(image_urls)} images. Google may have limited results.")
-                break
-
-        return list(set(image_urls))[:num_images]
+        search_url = f"{GOOGLE_IMAGE}q={query}"
+        response = requests.get(search_url, headers=headers, timeout=15)
+        response.raise_for_status()
+        
+        # Extract JSON data from script tags
+        soup = BeautifulSoup(response.text, 'html.parser')
+        scripts = soup.find_all('script')
+        image_data = []
+        pattern = re.compile(r'AF_initDataCallback\({key: \'ds:1\', data:(.*?), sideChannel: {}}\);')
+        
+        for script in scripts:
+            if match := pattern.search(script.text):
+                try:
+                    data = json.loads(match.group(1))
+                    images = data[31][0][12][2]
+                    image_data.extend(images)
+                except (json.JSONDecodeError, IndexError) as e:
+                    SESSION_STATE.errors.append(f"JSON parsing error: {str(e)}")
+        
+        # Extract URLs from JSON structure
+        urls = []
+        for img in image_data[:num_images]:
+            try:
+                url = img[1][3][0]
+                if url.startswith('http'):
+                    urls.append(url)
+            except (IndexError, TypeError):
+                continue
+        
+        return list(dict.fromkeys(urls))[:num_images]  # Remove duplicates while preserving order
     
     except Exception as e:
-        st.error(f"Error fetching images: {str(e)}")
+        SESSION_STATE.errors.append(f"Scraping failed: {str(e)}")
         return []
 
-def process_image(url, target_width, target_height, enhance=True):
-    """Improved image processing with better error handling."""
+def process_image_wrapper(args):
+    """Wrapper for parallel image processing"""
+    url, target_size, enhance = args
     try:
         headers = {"User-Agent": UserAgent().random}
         response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
-        
         img = Image.open(BytesIO(response.content)).convert("RGB")
-        orig_width, orig_height = img.size
-        target_aspect = target_width / target_height
-        orig_aspect = orig_width / orig_height
-
-        if orig_aspect > target_aspect:
-            new_height = target_height
-            new_width = int(orig_width * (target_height / orig_height))
-            img = img.resize((new_width, new_height), Image.LANCZOS)
-            left = (new_width - target_width) // 2
-            img = img.crop((left, 0, left + target_width, target_height))
-        else:
-            new_width = target_width
-            new_height = int(orig_height * (target_width / orig_width))
-            img = img.resize((new_width, new_height), Image.LANCZOS)
-            top = (new_height - target_height) // 2
-            img = img.crop((0, top, target_width, top + target_height))
-
+        
+        # Smart cropping and resizing
+        img = ImageOps.exif_transpose(img)  # Fix orientation
+        img.thumbnail((target_size[0]*2, target_size[1]*2), Image.LANCZOS)
+        
+        # Center crop
+        left = (img.width - target_size[0])/2
+        top = (img.height - target_size[1])/2
+        right = (img.width + target_size[0])/2
+        bottom = (img.height + target_size[1])/2
+        img = img.crop((left, top, right, bottom))
+        
         if enhance:
             img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
         
         return img
     except Exception as e:
-        st.error(f"Failed to process {url}: {str(e)}")
+        SESSION_STATE.errors.append(f"Failed to process {url[:50]}...: {str(e)}")
         return None
 
-def image_to_bytes(img):
-    """Convert PIL image to bytes with quality optimization."""
+def image_to_bytes(img, format='JPEG', quality=85):
+    """Optimized image serialization"""
     buffered = BytesIO()
-    img.save(buffered, format="JPEG", quality=85, optimize=True)
+    img.save(buffered, format=format, quality=quality, optimize=True)
     return buffered.getvalue()
 
 # Streamlit UI
-st.title("Google Images Scraper & Processor")
+st.set_page_config(page_title="Ultra Image Scraper", page_icon="🚀", layout="wide")
 
 with st.sidebar:
-    st.header("Configuration")
-    num_images = st.slider("Number of images to fetch", 1, 100, 50)
-    enhance = st.checkbox("Enhance image quality", True)
-    aspect_ratio = st.radio("Aspect Ratio", ["16:9", "9:16"], index=0)
+    st.title("⚙️ Settings")
+    query = st.text_input("🔍 Search Query", help="Enter what you want to search for")
+    num_images = st.slider("📷 Number of Images", 1, 200, 50)
+    aspect_ratio = st.selectbox("📐 Aspect Ratio", ["16:9", "9:16", "1:1", "4:3"])
+    enhance = st.toggle("✨ Enhance Quality", True)
+    img_format = st.radio("🖼️ Format", ["JPEG", "PNG"], index=0)
+    img_quality = st.slider("🎯 Quality", 1, 100, 85)
+    
+    if st.button("🚀 Start Scraping", use_container_width=True):
+        clear_state()
+        SESSION_STATE.metadata['start_time'] = time.time()
 
-query = st.text_input("Search query:", key="search_input")
-target_size = (1920, 1080) if aspect_ratio == "16:9" else (1080, 1920)
+# Main content area
+st.title("🚀 Ultra Fast Image Scraper")
+st.markdown("---")
 
-if st.button("Search and Process"):
-    if not query:
-        st.warning("Please enter a search query!")
-    else:
-        with st.spinner("Scraping Google Images..."):
-            urls = get_image_urls(query, num_images)
+# Aspect ratio mapping
+size_mapping = {
+    "16:9": (1920, 1080),
+    "9:16": (1080, 1920),
+    "1:1": (1024, 1024),
+    "4:3": (1600, 1200)
+}
+target_size = size_mapping[aspect_ratio]
+
+if 'start_time' in SESSION_STATE.metadata:
+    with st.status("🔥 Scraping in progress...", expanded=True) as status:
+        # Phase 1: Scraping
+        st.write("🌐 Connecting to Google Images...")
+        urls = get_image_urls(query, num_images)
         
-        if not urls:
-            st.error("No images found. Try a different query.")
-            st.stop()
+        # Phase 2: Parallel Processing
+        if urls:
+            st.write(f"⚡ Processing {len(urls)} images with {MAX_WORKERS} threads...")
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                args = [(url, target_size, enhance) for url in urls]
+                results = list(executor.map(process_image_wrapper, args))
+                
+            SESSION_STATE.processed = [img for img in results if img is not None]
+            status.update(label="✅ Processing complete!", state="complete", expanded=False)
+
+# Show results
+if SESSION_STATE.processed:
+    st.success(f"✨ Successfully processed {len(SESSION_STATE.processed)} images")
+    
+    # Performance metrics
+    duration = time.time() - SESSION_STATE.metadata['start_time']
+    st.metric("⏱️ Total Time", f"{duration:.2f} seconds")
+    
+    # Image grid
+    cols = st.columns(4)
+    for idx, img in enumerate(SESSION_STATE.processed):
+        with cols[idx % 4]:
+            st.image(img, use_column_width=True)
+            img_bytes = image_to_bytes(img, img_format, img_quality)
+            ext = img_format.lower()
+            st.download_button(
+                label=f"📥 Download #{idx+1}",
+                data=img_bytes,
+                file_name=f"{query.replace(' ', '_')}_{idx+1}.{ext}",
+                mime=f"image/{ext}",
+                use_container_width=True
+            )
+
+# Error display system
+if SESSION_STATE.errors:
+    with st.expander("⚠️ Error Log", expanded=False):
+        error_counts = {}
+        for error in SESSION_STATE.errors:
+            error_counts[error] = error_counts.get(error, 0) + 1
         
-        processed_images = []
-        progress_bar = st.progress(0)
-        
-        for i, url in enumerate(urls):
-            with st.spinner(f"Processing image {i+1}/{len(urls)}..."):
-                img = process_image(url, *target_size, enhance)
-                if img:
-                    processed_images.append(img)
-            progress_bar.progress((i+1)/len(urls))
-        
-        if processed_images:
-            st.success(f"Successfully processed {len(processed_images)} images")
-            cols = st.columns(3)
-            
-            for idx, img in enumerate(processed_images):
-                with cols[idx % 3]:
-                    st.image(img, use_column_width=True)
-                    img_bytes = image_to_bytes(img)
-                    st.download_button(
-                        label=f"Download Image {idx+1}",
-                        data=img_bytes,
-                        file_name=f"{query.replace(' ', '_')}_{idx+1}.jpg",
-                        mime="image/jpeg",
-                        key=f"download_{idx}"
-                    )
-        else:
-            st.error("Failed to process any images. Try different settings.")
+        for error, count in error_counts.items():
+            st.error(f"{error} (occurred {count} times)")
+
+# UI Enhancements
+st.markdown("---")
+with st.container():
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.button("♻️ Clear Results", on_click=clear_state, use_container_width=True)
+    with col2:
+        st.button("📊 Show Stats", use_container_width=True, 
+                 help="Show detailed performance statistics")
+    with col3:
+        st.link_button("📚 Documentation", "https://example.com", use_container_width=True)
+
+# Theme customization
+st.markdown("""
+<style>
+    [data-testid=stSidebar] {
+        background: linear-gradient(45deg, #1a1a1a, #2a2a2a) !important;
+    }
+    .stDownloadButton button {
+        width: 100% !important;
+    }
+</style>
+""", unsafe_allow_html=True)
