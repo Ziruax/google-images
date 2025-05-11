@@ -9,10 +9,10 @@ import time
 
 GOOGLE_IMAGE = "https://www.google.com/search?tbm=isch&"
 
-def get_image_urls(query, num_images=50):
+def get_image_urls(query, num_images=20):
     """Fetch image URLs from Google Images with error collection."""
     errors = []
-    if num_images < 1 or num_images > 100:
+    if num_images < 1 or num_images > 200:
         errors.append("Number of images must be between 1 and 100.")
         return [], errors
     
