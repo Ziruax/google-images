@@ -13,15 +13,32 @@ def get_image_urls(query, num_images=10):
     if num_images < 1 or num_images > 50:
         st.error("Number of images must be between 1 and 50.")
         return []
-    arguments = {"keywords": query, "limit": num_images, "no_download": True, "print_urls": False}
+    arguments = {
+        "keywords": query,
+        "limit": num_images,
+        "no_download": True,
+        "print_urls": False,
+        "format": "jpg"  # Ensure only JPG images for consistency
+    }
     try:
-        paths = response.download(arguments)
-        if not paths.get(query):
-            st.warning("No images found for the query.")
-            return []
-        return paths[query]
+        result = response.download(arguments)
+        # Check if result is a tuple (paths, errors) or a dictionary
+        if isinstance(result, tuple):
+            paths, errors = result
+            if errors:
+                st.warning(f"Some errors occurred while fetching images: {errors}")
+            if not paths.get(query):
+                st.warning("No images found for the query.")
+                return []
+            return paths[query]
+        else:
+            # Handle dictionary case (older behavior)
+            if not result.get(query):
+                st.warning("No images found for the query.")
+                return []
+            return result[query]
     except Exception as e:
-        st.error(f"Error fetching images: {e}")
+        st.error(f"Error fetching images: {str(e)}")
         return []
 
 def process_image(url, target_width, target_height, enhance=True):
