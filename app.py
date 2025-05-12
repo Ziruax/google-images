@@ -12,7 +12,7 @@ GOOGLE_IMAGE = "https://www.google.com/search?tbm=isch&"
 def get_image_urls(query, num_images=20):
     """Fetch image URLs from Google Images with error collection."""
     errors = []
-    if num_images < 1 or num_images > 200:
+    if num_images < 1 or num_images > 100:
         errors.append("Number of images must be between 1 and 100.")
         return [], errors
     
@@ -118,7 +118,7 @@ st.markdown("---")
 with st.sidebar:
     st.header("⚙️ Settings")
     with st.expander("Scraping Parameters", expanded=True):
-        num_images = st.slider("Number of images", 1, 100, 50,
+        num_images = st.slider("Number of images", 1, 100, 20,
                               help="Choose how many images to scrape from Google")
         
     with st.expander("Processing Options", expanded=True):
