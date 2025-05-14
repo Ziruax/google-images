@@ -9,7 +9,7 @@ import time
 
 GOOGLE_IMAGE = "https://www.google.com/search?tbm=isch&"
 
-def get_image_urls(query, num_images=50):
+def get_image_urls(query, num_images=20):
     """Fetch image URLs from Google Images with error collection."""
     errors = []
     if num_images < 1 or num_images > 100:
@@ -149,7 +149,7 @@ with st.sidebar:
                             help="Apply advanced image optimization techniques")
         
     with st.expander("Scraping Settings", expanded=True):
-        num_images = st.slider("Number of Images", 1, 100, 50,
+        num_images = st.slider("Number of Images", 1, 100, 20,
                               help="Maximum number of images to scrape")
         safety = st.checkbox("Safe Search", True,
                            help="Filter explicit content (when possible)")
